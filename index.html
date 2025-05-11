@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sign Language Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { margin: 0; background: #252628; color: #fff; font-family: 'Inter', Arial, sans-serif; }
+    .container { display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .left { background: #ffe943; border-radius: 32px; padding: 32px; margin: 24px; min-width: 260px; display: flex; flex-direction: column; align-items: center; }
+    .left img { width: 180px; height: 240px; object-fit: contain; margin-bottom: 24px; }
+    .left .pose { font-size: 38px; color: #222; font-weight: 600; }
+    .right { flex: 1; max-width: 500px; margin: 24px; }
+    .modes button { margin-right: 12px; padding: 8px 16px; border-radius: 8px; border: 0; font-weight: 600; cursor: pointer; }
+    .modes .active { background: #1ef876; color: #111; }
+    .modes .inactive { background: #333; color: #fff; }
+    .points { float: right; color: #ccc; font-weight: 400; font-size: 18px; }
+    .status { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+    .accuracy-bar { height: 8px; background: #444; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+    .accuracy-fill { height: 8px; transition: width 0.3s, background 0.3s; }
+    .video { width: 320px; height: 240px; background: #18191a; border-radius: 16px; border: 2px solid #444; }
+    select { font-size: 18px; padding: 4px; border-radius: 6px; }
+  </style>
+  <style>
+    #success-message {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(40,60,40,0.65);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.5rem;
+      font-weight: bold;
+      color: #1ef876;
+      text-shadow: 0 2px 16px #000;
+      transition: opacity 0.4s;
+      pointer-events: none;
+      display: flex;
+      opacity: 0;
+    }
+    #success-message.active {
+      display: flex;
+      opacity: 1;
+      animation: popscale 0.5s cubic-bezier(.5,1.8,.7,.9);
+    }
+    @keyframes popscale {
+      0% { transform: scale(0.7); opacity: 0; }
+      60% { transform: scale(1.08); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Linke Seite: Bild und Buchstabe -->
+    <div class="left">
+      <img id="pose-img" src="img/A.svg" alt="Pose A">
+      <canvas id="pose-canvas" width="180" height="240" style="position:absolute;pointer-events:none;left:0;top:0;"></canvas>
+      <span class="pose" id="pose-name">A</span>
+    </div>
+    <!-- Rechte Seite: Video, Feedback -->
+    <div class="right">
+      <div class="modes">
+        <button id="learn-btn" class="active">Learn Mode</button>
+        <button id="quiz-btn" class="inactive">Quiz Mode</button>
+        <span class="points" id="points">0 Points</span>
+      </div>
+      <div class="status" id="status">Starting camera...</div>
+      <div id="accuracy-text" style="font-weight:bold;font-size:2.7rem;color:#f44;text-shadow:0 2px 8px #222;letter-spacing:1px;">0% accuracy</div>
+      <div class="accuracy-bar"><div id="accuracy-bar" class="accuracy-fill" style="width:0%;background:#f44;"></div></div>
+      <div id="accuracy-hint" style="font-size:1.1rem;color:#ccc;margin-top:4px;">From <span id="threshold-value">70%</span> the sign is considered <span style="color:#1ef876;font-weight:600;">correct</span>.</div>
+      <div style="position:relative;display:inline-block;">
+        <video id="video" class="video" autoplay playsinline muted style="position:relative;z-index:1;"></video>
+        <canvas id="overlay-canvas" width="320" height="240" style="position:absolute;left:0;top:0;z-index:2;pointer-events:none;"></canvas>
+      </div>
+      <div style="margin-top:16px;color:#aaa;font-size:15px;">
+        Hold your hand in the correct position for five seconds.<br>
+        <span id="feedback" style="color:#f44;font-weight:600;">Not recognized yet...</span>
+      </div>
+      <div id="learn-select" style="margin-top:24px;">
+        <label>Choose letter: </label>
+        <select id="pose-select"></select>
+      </div>
+    </div>
+  </div>
+  <!-- Erfolgs-Overlay -->
+  <div id="success-message">Great! Correct sign <span style="font-size:2.2rem;">🎉</span></div>
+  <!-- MediaPipe Hands + Camera -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script>
+    // --- Einstellungen ---
+    const poseChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+    let poseName = "A";
+    let reference = null;
+    let points = 0;
+    let mode = "learn"; // or "quiz"
+    let timeout = null;
+    // --- UI Referenzen ---
+    const poseImg = document.getElementById("pose-img");
+    const poseNameEl = document.getElementById("pose-name");
+    const statusEl = document.getElementById("status");
+    const accuracyText = document.getElementById("accuracy-text");
+    const accuracyBar = document.getElementById("accuracy-bar");
+    const feedbackEl = document.getElementById("feedback");
+    const pointsEl = document.getElementById("points");
+    const poseSelect = document.getElementById("pose-select");
+    const learnBtn = document.getElementById("learn-btn");
+    const quizBtn = document.getElementById("quiz-btn");
+    const learnSelect = document.getElementById("learn-select");
+    // --- Pose-Auswahl füllen ---
+    poseChars.forEach(c => {
+      const opt = document.createElement("option");
+      opt.value = c; opt.textContent = c;
+      poseSelect.appendChild(opt);
+    });
+    // --- Pose wechseln ---
+    function setPose(char) {
+      poseName = char;
+      poseSelect.value = char;
+      poseNameEl.textContent = char;
+      // Learn-Mode: SVG und Canvas anzeigen
+      if (mode === "learn") {
+        poseImg.style.display = "";
+        document.getElementById('pose-canvas').style.display = "";
+      } else {
+        poseImg.style.display = "none";
+        document.getElementById('pose-canvas').style.display = "none";
+      }
+      // Bild nur im Learn-Mode wechseln
+      if (mode === "learn") {
+        poseImg.src = `img/${char}.svg`;
+        poseImg.alt = `Pose ${char}`;
+      }
+      loadReference();
+    }
+    poseSelect.addEventListener("change", e => setPose(e.target.value));
+    // --- Modus wechseln ---
+    learnBtn.onclick = () => {
+      mode = "learn";
+      learnBtn.className = "active";
+      quizBtn.className = "inactive";
+      learnSelect.style.display = "";
+      setPose(poseName);
+    };
+    quizBtn.onclick = () => {
+      mode = "quiz";
+      quizBtn.className = "active";
+      learnBtn.className = "inactive";
+      learnSelect.style.display = "none";
+      setRandomPose();
+    };
+    function setRandomPose() {
+      const r = poseChars[Math.floor(Math.random() * poseChars.length)];
+      setPose(r);
+    }
+
+    // Handles automatic card switching after correct recognition
+    function nextCardAfterSuccess() {
+      if (mode === "quiz") {
+        setRandomPose();
+        statusEl.textContent = "Show the correct sign with your hand!";
+        timeout = null;
+      } else {
+        statusEl.textContent = "Correct! New sign in 10 seconds...";
+        timeout = setTimeout(() => {
+          setRandomPose();
+          statusEl.textContent = "Hold your hand in the correct position!";
+          timeout = null;
+        }, 10000);
+      }
+    }
+    // --- Trainingsdaten laden ---
+    function loadReference() {
+      fetch(`trainingfiles/${poseName}.json`)
+        .then(r => r.json())
+        .then(data => {
+          reference = Array.isArray(data) ? data : data.landmarks;
+          drawReferencePose();
+          drawOverlayPose();
+        })
+        .catch(() => {
+          reference = null;
+          drawReferencePose();
+          drawOverlayPose();
+        });
+    }
+    // MediaPipe-typische Finger-Verbindungen
+    const FINGER_CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],      // Daumen
+      [0,5],[5,6],[6,7],[7,8],     // Zeigefinger
+      [0,9],[9,10],[10,11],[11,12],// Mittelfinger
+      [0,13],[13,14],[14,15],[15,16],// Ringfinger
+      [0,17],[17,18],[18,19],[19,20],// kleiner Finger
+      [5,9],[9,13],[13,17],[5,17]   // Handfläche
+    ];
+    function drawReferencePose() {
+      const canvas = document.getElementById('pose-canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if (!reference || reference.length !== 21) return;
+      // Normiere auf Canvasgröße (wie MediaPipe: x/y in [0,1])
+      const margin = 20;
+      const scaleX = canvas.width - 2*margin;
+      const scaleY = canvas.height - 2*margin;
+      // Optional: z für Farbe
+      // Linien
+      ctx.save();
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.65;
+      for (const [a,b] of FINGER_CONNECTIONS) {
+        const pa = reference[a], pb = reference[b];
+        ctx.beginPath();
+        ctx.moveTo(margin+pa.x*scaleX, margin+pa.y*scaleY);
+        ctx.lineTo(margin+pb.x*scaleX, margin+pb.y*scaleY);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // Punkte
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      for (let i=0; i<reference.length; ++i) {
+        const pt = reference[i];
+        ctx.beginPath();
+        ctx.arc(margin+pt.x*scaleX, margin+pt.y*scaleY, 6, 0, 2*Math.PI);
+        ctx.fillStyle = i===0 ? '#1ef876' : '#ffe943';
+        ctx.fill();
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    function drawOverlayPose() {
+      const canvas = document.getElementById('overlay-canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if (!reference || reference.length !== 21) return;
+      // Normiere auf Videogröße (x/y [0,1])
+      const margin = 16;
+      const scaleX = canvas.width - 2*margin;
+      const scaleY = canvas.height - 2*margin;
+      ctx.save();
+      ctx.strokeStyle = '#ffe943';
+      ctx.lineWidth = 4;
+      ctx.globalAlpha = 0.55;
+      for (const [a,b] of FINGER_CONNECTIONS) {
+        const pa = reference[a], pb = reference[b];
+        ctx.beginPath();
+        ctx.moveTo(margin+pa.x*scaleX, margin+pa.y*scaleY);
+        ctx.lineTo(margin+pb.x*scaleX, margin+pb.y*scaleY);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.save();
+      ctx.globalAlpha = 0.8;
+      for (let i=0; i<reference.length; ++i) {
+        const pt = reference[i];
+        ctx.beginPath();
+        ctx.arc(margin+pt.x*scaleX, margin+pt.y*scaleY, 7, 0, 2*Math.PI);
+        ctx.fillStyle = i===0 ? '#1ef876' : '#ffe943';
+        ctx.fill();
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    setPose("A");
+    // --- MediaPipe Hands Setup ---
+    const video = document.getElementById("video");
+    let hands = null;
+    let camera = null;
+    let lastAccuracy = 0;
+    function normalizeLandmarks(landmarks) {
+      if (!landmarks || landmarks.length !== 21) return [];
+      const wrist = landmarks[0];
+      const tip = landmarks[12];
+      const scale = Math.hypot(tip.x - wrist.x, tip.y - wrist.y, tip.z - wrist.z) || 1;
+      return landmarks.map(pt => ({
+        x: (pt.x - wrist.x) / scale,
+        y: (pt.y - wrist.y) / scale,
+        z: (pt.z - wrist.z) / scale
+      }));
+    }
+    function calcPoseDistance(live, ref) {
+      if (!live || !ref || live.length !== ref.length) return 1;
+      let sum = 0;
+      for (let i = 0; i < live.length; i++) {
+        const dx = live[i].x - ref[i].x;
+        const dy = live[i].y - ref[i].y;
+        const dz = live[i].z - ref[i].z;
+        sum += Math.sqrt(dx*dx + dy*dy + dz*dz);
+      }
+      return sum / live.length;
+    }
+    function calcAccuracy(distance, maxDistance = 0.3) {
+      let acc = 1 - Math.min(distance, maxDistance) / maxDistance;
+      return Math.round(acc * 100);
+    }
+    // Erfolgs-Overlay anzeigen
+    function showSuccessMessage() {
+      const msg = document.getElementById('success-message');
+      msg.classList.add('active');
+      setTimeout(() => msg.classList.remove('active'), 1500);
+    }
+    function updateAccuracyUI(acc) {
+      let color = "#f44";
+      if (acc > 70) color = "#fc0";
+      if (acc > 90) color = "#0c0";
+      accuracyText.textContent = acc + "% genau";
+      accuracyText.style.color = color;
+      accuracyBar.style.width = acc + "%";
+      accuracyBar.style.background = color;
+      feedbackEl.textContent = acc >= 70 ? "Sign recognized!" : "Not recognized yet...";
+      feedbackEl.style.color = acc >= 70 ? "#1ef876" : "#f44";
+    }
+    function onResults(results) {
+      if (!reference) { updateAccuracyUI(0); return; }
+      if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
+        const normRef = normalizeLandmarks(reference);
+        const normLive = normalizeLandmarks(results.multiHandLandmarks[0]);
+        const dist = calcPoseDistance(normLive, normRef);
+        const acc = calcAccuracy(dist);
+        updateAccuracyUI(acc);
+        lastAccuracy = acc;
+        // Quiz-Modus Punktevergabe
+        if (acc >= 70 && !timeout) {
+          showSuccessMessage();
+          points += 100;
+          pointsEl.textContent = points + " Points";
+          nextCardAfterSuccess();
+        }
+      } else {
+        updateAccuracyUI(0);
+      }
+    }
+    // Initialisiere MediaPipe Hands
+    function startMediaPipe() {
+      hands = new Hands({
+        locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+      });
+      hands.onResults(onResults);
+      camera = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 480, height: 360
+      });
+      camera.start();
+      statusEl.textContent = "Halte deine Hand ins Bild und forme das Zeichen!";
+    }
+    // Starte nach User-Interaktion (wg. Kamera-Policy)
+    window.addEventListener('DOMContentLoaded', () => {
+      video.addEventListener('click', () => {
+        if (!hands) startMediaPipe();
+      });
+      // Oder automatisch starten (ggf. Kamera-Freigabe erforderlich)
+      setTimeout(() => { if (!hands) startMediaPipe(); }, 1000);
+    });
+  </script>
+</body>
+</html>
